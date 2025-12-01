@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>연차 관리 AI 비서 (Anti-Hallucination)</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
+    <style>
+        body { font-family: 'Apple SD Gothic Neo', 'Noto Sans KR', sans-serif; background-color: #f0f2f5; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        #chat-container { width: 450px; height: 750px; background: white; border-radius: 15px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); display: flex; flex-direction: column; overflow: hidden; }
+        
+        #header { background: #6655ff; color: white; padding: 20px; text-align: center; font-weight: bold; font-size: 1.2rem; display: flex; flex-direction: column; gap: 5px; }
+        .sub-header { font-size: 0.8rem; opacity: 0.9; font-weight: normal; margin-top: 5px; background: rgba(0,0,0,0.1); padding: 5px; border-radius: 5px;}
+        
+        #messages { flex: 1; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 15px; background-color: #f9f9fa; }
+        .message { max-width: 80%; padding: 12px 16px; border-radius: 15px; font-size: 14px; line-height: 1.5; word-break: break-word; }
+        
+        .user { align-self: flex-end; background-color: #6655ff; color: white; border-bottom-right-radius: 2px; }
+        .bot { align-self: flex-start; background-color: #ffffff; color: #333; border: 1px solid #e0e0e0; border-bottom-left-radius: 2px; }
+        
+        #input-area { display: flex; padding: 15px; background: #fff; border-top: 1px solid #eee; }
+        #user-input { flex: 1; padding: 12px; border: 1px solid #ddd; border-radius: 25px; outline: none; background-color: #f8f8f8; }
+        #user-input:focus { border-color: #6655ff; background-color: #fff; }
+        
+        #send-btn { margin-left: 10px; width: 45px; height: 45px; background: #6655ff; color: white; border: none; border-radius: 50%; cursor: pointer; display: flex; justify-content: center; align-items: center; }
+        #send-btn:hover { background: #5243cc; }
+        #send-btn:disabled { background: #ccc; }
+        
+        .loading { font-size: 12px; color: #6655ff; text-align: center; margin-bottom: 10px; display: none; font-weight: bold; }
+        
+        .status-badge { display: inline-block; width: 10px; height: 10px; background: #ccc; border-radius: 50%; margin-right: 5px; }
+        .status-active { background: #00ff00; box-shadow: 0 0 5px #00ff00; }
+        .status-error { background: #ff4444; }
+    </style>
+</head>
+<body>
+
+<div id="chat-container">
+    <div id="header">
+        <div>연차 관리 AI 비서</div>
+        <div class="sub-header">
+            <span id="status-light" class="status-badge"></span>
+            <span id="file-status">파일 연결 대기 중...</span>
+        </div>
+    </div>
+
+    <div id="messages">
+        <div class="message bot">
+            안녕하세요! 👋<br>
+            <strong>'연차계획서.xlsx'</strong>를 정밀 분석 모드로 읽고 있습니다.<br><br>
+            이제 없는 날짜를 지어내지 않고 정확하게 답변합니다.
+        </div>
+    </div>
+    
+    <div id="loading" class="loading">데이터 분석 중... 🔍</div>
+    
+    <div id="input-area">
+        <input type="text" id="user-input" placeholder="예: 12월 1일 쉬는 사람 있어?" onkeypress="handleEnter(event)">
+        <button id="send-btn" onclick="sendMessage()">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"></path></svg>
+        </button>
+    </div>
+</div>
+
+<script>
+    const MODEL_NAME = "gemma3:12b"; 
+    const EXCEL_FILE_NAME = "연차계획서.xlsx";
+    
+    let structuredData = ""; // LLM에게 떠먹여줄 구조화된 데이터
+    let isFileLoaded = false;
+
+    window.onload = function() {
+        loadExcelData();
+    };
+
+    async function loadExcelData() {
+        const statusSpan = document.getElementById('file-status');
+        const statusLight = document.getElementById('status-light');
+        
+        try {
+            const response = await fetch(`./${EXCEL_FILE_NAME}`);
+            if (!response.ok) throw new Error("CORS 또는 파일 없음");
+
+            const arrayBuffer = await response.arrayBuffer();
+            const workbook = new ExcelJS.Workbook();
+            await workbook.xlsx.load(arrayBuffer);
+
+            // 중요: 환각 방지를 위해 Sheet1(달력)은 무시하고, Sheet2(리스트)만 사용하여 정확도 높임
+            const sheet2 = workbook.worksheets[1]; 
+            
+            // 데이터 구조화 (JSON 형태의 텍스트로 변환)
+            structuredData = parseSheetToStructuredText(sheet2);
+
+            isFileLoaded = true;
+            statusSpan.innerText = "연동 완료: 정밀 분석 모드";
+            statusLight.classList.add('status-active');
+            addMessage(`✅ <strong>분석 완료!</strong><br>
+            데이터를 명단 리스트 형태로 변환했습니다.<br>
+            이제 "12월 1일" 처럼 없는 날짜는 확실히 없다고 대답합니다.`, "bot");
+
+        } catch (error) {
+            console.error(error);
+            statusSpan.innerText = "파일 로드 실패";
+            statusLight.classList.add('status-error');
+            addMessage(`❌ <strong>오류 발생</strong><br>Live Server로 실행했는지 확인해주세요.`, "bot");
+        }
+    }
+
+    // 엑셀 데이터를 "이름 - 날짜 - 상태" 리스트로 깔끔하게 정제하는 함수
+    function parseSheetToStructuredText(sheet) {
+        if (!sheet) return "데이터 없음";
+
+        let dataList = [];
+        
+        sheet.eachRow((row, rowNumber) => {
+            if (rowNumber <= 1) return; // 헤더 제외
+
+            const nameCell = row.getCell(1);
+            const name = nameCell.value ? String(nameCell.value).trim() : null;
+            
+            if (!name) return;
+
+            row.eachCell((cell, colNumber) => {
+                if (colNumber === 1) return; // 이름 열 제외
+                if (!cell.value) return; 
+
+                const rawText = String(cell.value);
+                let isRed = false;
+
+                // 빨간색 감지
+                if (cell.font && cell.font.color && cell.font.color.argb) {
+                    const colorHex = cell.font.color.argb;
+                    if (colorHex.includes('FF0000') || colorHex.includes('FFFF0000')) {
+                        isRed = true;
+                    }
+                }
+
+                // 날짜 텍스트 정규화 (12.3 -> 12월 3일)
+                // 정규표현식으로 숫자.숫자 패턴을 찾아서 한글 날짜로 바꿈
+                let normalizedDate = rawText;
+                const dateMatch = rawText.match(/(\d{1,2})\.(\d{1,2})/);
+                
+                if (dateMatch) {
+                    const month = dateMatch[1];
+                    const day = dateMatch[2];
+                    // "12월 3일" 형태로 변환 + 뒤에 붙은 (5시간) 같은 텍스트 유지
+                    const extraText = rawText.replace(dateMatch[0], "").trim();
+                    normalizedDate = `${month}월 ${day}일${extraText}`;
+                }
+
+                // 승인 여부 결정
+                let status = "승인 완료";
+                if (isRed || rawText.includes("*") || rawText.includes("(미)")) {
+                    status = "승인 대기(미승인)";
+                }
+
+                // 특수문자 제거 후 리스트에 추가
+                const cleanDate = normalizedDate.replace(/[*()미]/g, '').trim();
+                
+                // 데이터 한 줄 생성
+                dataList.push(`- [이름: ${name}, 날짜: ${cleanDate}, 상태: ${status}]`);
+            });
+        });
+
+        // 리스트를 텍스트로 합침
+        return dataList.join("\n");
+    }
+
+    // 날짜 계산 함수들
+    function getFormattedDate(date) {
+        const year = date.getFullYear();
+        const month = date.getMonth() + 1;
+        const day = date.getDate();
+        const weekDay = date.toLocaleString('ko-KR', { weekday: 'long' });
+        return `${month}월 ${day}일`; // 포맷을 "12월 1일" 처럼 엑셀 변환 데이터와 맞춤
+    }
+
+    async function sendMessage() {
+        if (!isFileLoaded) {
+            addMessage("파일 로드 전입니다.", "bot");
+            return;
+        }
+
+        const inputField = document.getElementById("user-input");
+        const sendBtn = document.getElementById("send-btn");
+        const loading = document.getElementById("loading");
+        const text = inputField.value.trim();
+        if (!text) return;
+
+        addMessage(text, "user");
+        inputField.value = "";
+        inputField.disabled = true;
+        sendBtn.disabled = true;
+        loading.style.display = "block";
+
+        const now = new Date();
+        const tomorrow = new Date(now); tomorrow.setDate(now.getDate() + 1);
+        const dayAfter = new Date(now); dayAfter.setDate(now.getDate() + 2);
+
+        // 시스템 프롬프트: 데이터에 없는 내용은 절대 말하지 말라고 강력 지시
+        const systemPrompt = `
+너는 팩트 체크를 최우선으로 하는 인사 담당 AI야.
+
+[날짜 기준 정보]
+- 오늘: ${getFormattedDate(now)}
+- 내일: ${getFormattedDate(tomorrow)}
+- 모레: ${getFormattedDate(dayAfter)}
+
+[확정된 연차 데이터베이스]
+아래 목록에 **있는 날짜만** 연차가 있는 거야. 목록에 없으면 무조건 "연차 없음"이야.
+---------------------------------------------------
+${structuredData}
+---------------------------------------------------
+
+[답변 규칙 - 절대 준수]
+1. 사용자가 특정 날짜(예: 12월 1일)를 물어보면, 위 [확정된 연차 데이터베이스]에서 그 날짜가 포함된 줄을 찾아.
+2. **만약 데이터베이스에 그 날짜(12월 1일)가 명시적으로 적힌 줄이 없다면, 반드시 "해당 날짜에 연차를 사용하는 사람은 없습니다."라고 답해.** (절대 지어내지 마!)
+3. 비슷한 날짜(12월 11일 등)가 있어도, 사용자가 물어본 날짜와 정확히 일치하지 않으면 언급하지 마.
+4. 답변 형식:
+   - 승인 완료 시: "OOO님이 O월 O일에 연차를 **사용합니다.**"
+   - 승인 대기 시: "OOO님이 O월 O일에 연차를 **사용할 계획을 가지고 있습니다.**"
+`;
+
+        try {
+            const response = await fetch("http://localhost:11434/api/chat", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    model: MODEL_NAME,
+                    messages: [ 
+                        { role: "system", content: systemPrompt }, 
+                        { role: "user", content: text } 
+                    ],
+                    stream: false 
+                })
+            });
+
+            if (!response.ok) throw new Error("Ollama 연결 실패");
+            const data = await response.json();
+            addMessage(data.message.content, "bot");
+
+        } catch (error) {
+            console.error(error);
+            addMessage("오류가 발생했습니다.", "bot");
+        } finally {
+            inputField.disabled = false;
+            sendBtn.disabled = false;
+            loading.style.display = "none";
+            inputField.focus();
+        }
+    }
+
+    function addMessage(text, sender) {
+        const messagesDiv = document.getElementById("messages");
+        const div = document.createElement("div");
+        div.className = `message ${sender}`;
+        div.innerHTML = text.replace(/\n/g, "<br>");
+        messagesDiv.appendChild(div);
+        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    }
+    
+    function handleEnter(event) {
+        if (event.key === "Enter") sendMessage();
+    }
+</script>
+</body>
+</html>
